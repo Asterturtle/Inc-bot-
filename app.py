@@ -542,6 +542,25 @@ def handle_status_button(ack, body, client):
     track_message(user_id, channel, result["ts"])
 
 
+@app.action("clear_chat")
+def handle_clear_chat(ack, body, client):
+    """Delete all bot messages except the control panel."""
+    ack()
+    user_id = body["user"]["id"]
+
+    incident = active_incidents.get(user_id)
+    if not incident:
+        return
+
+    for msg in incident.get("sent_messages", []):
+        try:
+            client.chat_delete(channel=msg["channel"], ts=msg["ts"])
+        except Exception:
+            pass
+
+    incident["sent_messages"] = []
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

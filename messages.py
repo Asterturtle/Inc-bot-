@@ -116,6 +116,11 @@ def build_control_panel(elapsed_min: int, current_step: int,
     })
     elements.append({
         "type": "button",
+        "text": {"type": "plain_text", "text": ":wastebasket: Clear"},
+        "action_id": "clear_chat",
+    })
+    elements.append({
+        "type": "button",
         "text": {"type": "plain_text", "text": "Stop"},
         "style": "danger",
         "action_id": "stop_incident",
@@ -161,7 +166,54 @@ def build_app_home(has_active_incident: bool = False, duration_minutes: int = 0,
         })
 
     blocks.append({"type": "divider"})
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "Commands: `/incident-start`  `/incident-stop`  `/incident-status`"}]})
+
+    # --- Guide section ---
+    blocks.append({"type": "header", "text": {"type": "plain_text", "text": ":book: How to use"}})
+
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+        "*Getting started*\n"
+        "Press the *Start incident* button above or type `/incident-start` in any channel. "
+        "The bot will send you DMs with escalation reminders on a timer."
+    )}})
+
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+        "*Escalation ladder*\n"
+        ":rotating_light: `T+0`  — Responsible hero\n"
+        ":warning: `T+10` — Head of Engineering + _SRE hero (if needed)_\n"
+        ":large_orange_circle: `T+20` — _Head of SRE (if needed)_\n"
+        ":red_circle: `T+30` — Chief Architect\n"
+        ":fire: `T+40` — CTO"
+    )}})
+
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+        "*Status updates*\n"
+        "Every 15 minutes you get a reminder with copy-paste templates for the client ticket and internal ticket."
+    )}})
+
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+        "*Control panel buttons*\n"
+        ":double_vertical_bar: *Pause / Resume* — Freeze all timers (e.g. waiting for vendor fix)\n"
+        ":clock3: *+5 min* — Push next escalation by 5 minutes\n"
+        ":bar_chart: *Status* — Detailed progress view with all steps\n"
+        ":wastebasket: *Clear* — Delete all bot messages, keep the panel\n"
+        "*Stop* — End the incident, clean up, show summary"
+    )}})
+
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+        "*Done button*\n"
+        "Each escalation and status update has a *Done* button. Press it to confirm the action. "
+        "If you don't press it within 2 minutes, the reminder will repeat (max 3 times)."
+    )}})
+
+    blocks.append({"type": "divider"})
+
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+        "*Commands*\n"
+        "`/incident-start` — Start the incident timer\n"
+        "`/incident-stop` — Stop and show summary\n"
+        "`/incident-status` — Detailed progress view"
+    )}})
+
     return blocks
 
 
