@@ -1,11 +1,12 @@
 """
-Slack Block Kit message builders v3.
+Slack Block Kit message builders v4.
 - No ticket key
 - Stop button in every message
 - App Home with Start button
+- Next step countdown in every message
 """
 
-from escalation import CLIENT_TEMPLATE, INTERNAL_TEMPLATE
+from escalation import CLIENT_TEMPLATE, INTERNAL_TEMPLATE, ESCALATION_STEPS, STATUS_UPDATE_INTERVAL
 
 
 def _stop_button():
@@ -23,9 +24,60 @@ def _stop_button():
     }
 
 
-def build_app_home(has_active_incident: bool = False, duration_minutes: int = 0) -> list:
-    """Build the App Home tab view."""
+def _next_step_text(step_index: int) -> str:
+    """Build 'Next: ...' text based on current step."""
+    current = ESCALATION_STEPS[step_index]
+    current_min = current["minutes"]
 
+    # Find next escalation step
+    next_esc = None
+    for s in ESCALATION_STEPS:
+        if s["minutes"] > current_min:
+            next_esc = s
+            break
+
+    # Find next status update
+    # Status updates happen at 15, 30, 45, ...
+    # Find the first one after current_min
+    next_status_min = STATUS_UPDATE_INTERVAL
+    while next_status_min <= current_min:
+        next_status_min += STATUS_UPDATE_INTERVAL
+
+    parts = []
+
+    if next_esc:
+        mins_until_esc = next_esc["minutes"] - current_min
+        who = next_esc["notify"] or next_esc["optional"]
+        parts.append(f":arrow_right: Next escalation: *{who}* — in {mins_until_esc} min")
+
+    mins_until_status = next_status_min - current_min
+    parts.append(f":clipboard: Next status update in {mins_until_status} min")
+
+    return "\n".join(parts)
+
+
+def _next_status_text(elapsed_minutes: int) -> str:
+    """Build 'Next: ...' text for status update messages."""
+    # Find next escalation step after current elapsed time
+    next_esc = None
+    for s in ESCALATION_STEPS:
+        if s["minutes"] > elapsed_minutes:
+            next_esc = s
+            break
+
+    parts = []
+
+    if next_esc:
+        mins_until = next_esc["minutes"] - elapsed_minutes
+        who = next_esc["notify"] or next_esc["optional"]
+        parts.append(f":arrow_right: Next escalation: *{who}* — in {mins_until} min")
+
+    parts.append(f":clipboard: Next status update in {STATUS_UPDATE_INTERVAL} min")
+
+    return "\n".join(parts)
+
+
+def build_app_home(has_active_incident: bool = False, duration_minutes: int = 0) -> list:
     blocks = [
         {
             "type": "header",
@@ -86,9 +138,13 @@ def build_escalation_message(step: dict, step_index: int) -> dict:
 
     notify_text = "\n".join(notify_lines) if notify_lines else "_No mandatory notification at this step_"
 
+    next_text = _next_step_text(step_index)
+
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": title}},
         {"type": "section", "text": {"type": "mrkdwn", "text": notify_text}},
+        {"type": "divider"},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": next_text}]},
         {
             "type": "actions",
             "elements": [
@@ -112,6 +168,8 @@ def build_status_update_message(elapsed_minutes: int) -> dict:
     client_text = CLIENT_TEMPLATE.replace("{{text}}", "_<your text here>_")
     internal_text = INTERNAL_TEMPLATE.replace("{{text}}", "_<your text here>_")
 
+    next_text = _next_status_text(elapsed_minutes)
+
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": header}},
         {"type": "divider"},
@@ -120,6 +178,8 @@ def build_status_update_message(elapsed_minutes: int) -> dict:
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text": "*Internal update:*"}},
         {"type": "section", "text": {"type": "mrkdwn", "text": f"```{internal_text}```"}},
+        {"type": "divider"},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": next_text}]},
         {
             "type": "actions",
             "elements": [
