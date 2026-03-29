@@ -4,7 +4,7 @@ Slack bot that assists L1 support during Critical incidents with timed escalatio
 
 ## What it does
 
-When a support engineer runs `/incident-start PSUPINC-12345`, the bot sends personal DMs on a timer:
+When a support engineer runs `/incident-start`, the bot sends personal DMs on a timer:
 
 **Escalation ladder:**
 - T+0 — Responsible hero
