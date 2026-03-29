@@ -1,15 +1,82 @@
 """
-Slack Block Kit message builders.
-Constructs the DM messages for escalation reminders and status updates.
+Slack Block Kit message builders v3.
+- No ticket key
+- Stop button in every message
+- App Home with Start button
 """
 
 from escalation import CLIENT_TEMPLATE, INTERNAL_TEMPLATE
 
 
-def build_escalation_message(ticket_key: str, step: dict, step_index: int) -> dict:
-    """Build an escalation reminder message with a Done button."""
+def _stop_button():
+    return {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Stop incident"},
+        "style": "danger",
+        "action_id": "stop_incident",
+        "confirm": {
+            "title": {"type": "plain_text", "text": "Stop incident?"},
+            "text": {"type": "mrkdwn", "text": "This will cancel all timers and end the incident."},
+            "confirm": {"type": "plain_text", "text": "Yes, stop"},
+            "deny": {"type": "plain_text", "text": "Cancel"},
+        },
+    }
 
-    title = f":rotating_light: {step['title']} — {ticket_key}"
+
+def build_app_home(has_active_incident: bool = False, duration_minutes: int = 0) -> list:
+    """Build the App Home tab view."""
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": ":rotating_light: GR8Tech Incident Bot"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "Assists L1 support during Critical incidents with timed escalation reminders and status update templates."},
+        },
+        {"type": "divider"},
+    ]
+
+    if has_active_incident:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f":red_circle: *Incident active* — {duration_minutes} min elapsed"},
+        })
+        blocks.append({
+            "type": "actions",
+            "elements": [_stop_button()],
+        })
+    else:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ":large_green_circle: *No active incident*"},
+        })
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Start incident"},
+                    "style": "primary",
+                    "action_id": "start_incident",
+                },
+            ],
+        })
+
+    blocks.append({"type": "divider"})
+    blocks.append({
+        "type": "context",
+        "elements": [
+            {"type": "mrkdwn", "text": "You can also use `/incident-start` and `/incident-stop` commands."},
+        ],
+    })
+
+    return blocks
+
+
+def build_escalation_message(step: dict, step_index: int) -> dict:
+    title = f":rotating_light: {step['title']}"
 
     notify_lines = []
     if step["notify"]:
@@ -20,118 +87,74 @@ def build_escalation_message(ticket_key: str, step: dict, step_index: int) -> di
     notify_text = "\n".join(notify_lines) if notify_lines else "_No mandatory notification at this step_"
 
     blocks = [
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": title},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": notify_text},
-        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": title}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": notify_text}},
         {
             "type": "actions",
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "Done ✅"},
+                    "text": {"type": "plain_text", "text": "Done"},
                     "style": "primary",
                     "action_id": f"escalation_done_{step_index}",
-                    "value": ticket_key,
-                }
+                },
+                _stop_button(),
             ],
         },
     ]
 
-    return {
-        "text": f"{step['title']} — {ticket_key}",  # fallback for notifications
-        "blocks": blocks,
-    }
+    return {"text": step["title"], "blocks": blocks}
 
 
-def build_status_update_message(ticket_key: str, elapsed_minutes: int) -> dict:
-    """Build a status update reminder with both templates and a Done button."""
-
-    header = f":memo: {elapsed_minutes} min elapsed — time for status update\n*{ticket_key}*"
+def build_status_update_message(elapsed_minutes: int) -> dict:
+    header = f":memo: {elapsed_minutes} min elapsed — time for status update"
 
     client_text = CLIENT_TEMPLATE.replace("{{text}}", "_<your text here>_")
     internal_text = INTERNAL_TEMPLATE.replace("{{text}}", "_<your text here>_")
 
     blocks = [
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": header},
-        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": header}},
         {"type": "divider"},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "*Client update:*"},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"```{client_text}```"},
-        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": "*Client update:*"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"```{client_text}```"}},
         {"type": "divider"},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "*Internal update:*"},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"```{internal_text}```"},
-        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": "*Internal update:*"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"```{internal_text}```"}},
         {
             "type": "actions",
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "Done ✅"},
+                    "text": {"type": "plain_text", "text": "Done"},
                     "style": "primary",
                     "action_id": f"status_done_{elapsed_minutes}",
-                    "value": ticket_key,
-                }
+                },
+                _stop_button(),
             ],
         },
     ]
 
-    return {
-        "text": f"Status update reminder — {ticket_key}",
-        "blocks": blocks,
-    }
+    return {"text": "Status update reminder", "blocks": blocks}
 
 
 def build_confirmed_message(timestamp: str) -> dict:
-    """Build a replacement message after the user clicks Done."""
     return {
-        "text": f"✅ Confirmed at {timestamp}",
+        "text": f"Confirmed at {timestamp}",
         "blocks": [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"✅ *Confirmed at {timestamp}*",
-                },
-            }
+            {"type": "section", "text": {"type": "mrkdwn", "text": f":white_check_mark: *Confirmed at {timestamp}*"}},
         ],
     }
 
 
-def build_stop_summary(ticket_key: str, duration_minutes: int,
-                       escalations_triggered: int, status_updates_sent: int) -> dict:
-    """Build the summary message when /incident-stop is called."""
-
+def build_stop_summary(duration_minutes: int, escalations_triggered: int, status_updates_sent: int) -> dict:
     summary = (
-        f":white_check_mark: *Incident stopped — {ticket_key}*\n\n"
+        f":white_check_mark: *Incident stopped*\n\n"
         f"• Duration: {duration_minutes} minutes\n"
         f"• Escalation steps triggered: {escalations_triggered}\n"
         f"• Status updates sent: {status_updates_sent}"
     )
 
     return {
-        "text": f"Incident stopped — {ticket_key}",
-        "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": summary},
-            }
-        ],
+        "text": "Incident stopped",
+        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}],
     }
