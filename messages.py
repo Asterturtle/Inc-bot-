@@ -162,7 +162,10 @@ def build_app_home(has_active_incident: bool = False, duration_minutes: int = 0,
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": ":large_green_circle: *No active incident*"}})
         blocks.append({
             "type": "actions",
-            "elements": [{"type": "button", "text": {"type": "plain_text", "text": "Start incident"}, "style": "primary", "action_id": "start_incident"}],
+            "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": "Start incident"}, "style": "primary", "action_id": "start_incident"},
+                {"type": "button", "text": {"type": "plain_text", "text": ":wastebasket: Clear chat"}, "action_id": "clear_chat"},
+            ],
         })
 
     blocks.append({"type": "divider"})

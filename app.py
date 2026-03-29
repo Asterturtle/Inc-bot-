@@ -30,7 +30,6 @@ from messages import (
     build_status_view,
     build_confirmed_message,
     build_stop_summary,
-    build_welcome_message,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -42,9 +41,6 @@ scheduler = BackgroundScheduler()
 scheduler.start()
 
 active_incidents = {}
-
-# Track users who already got the welcome message (so we don't send it twice)
-welcomed_users = set()
 
 EXTEND_MINUTES = 5
 
@@ -377,7 +373,7 @@ def send_status_update(client, user_id: str, repeat_count: int = 0):
 
 
 # ---------------------------------------------------------------------------
-# App Home & Welcome message
+# App Home
 # ---------------------------------------------------------------------------
 
 @app.event("app_home_opened")
@@ -387,18 +383,6 @@ def handle_app_home_opened(client, event):
 
     if tab == "home":
         update_home(client, user_id)
-
-    # Send pinned welcome message on first visit to Messages tab
-    if tab == "messages" and user_id not in welcomed_users:
-        welcomed_users.add(user_id)
-        channel = get_dm_channel(client, user_id)
-        msg = build_welcome_message()
-        result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
-        # Pin the welcome message so it stays at the top
-        try:
-            client.pins_add(channel=channel, timestamp=result["ts"])
-        except Exception:
-            pass  # may fail if already pinned or no permission
 
 
 # ---------------------------------------------------------------------------
@@ -566,21 +550,50 @@ def handle_status_button(ack, body, client):
 
 @app.action("clear_chat")
 def handle_clear_chat(ack, body, client):
-    """Delete all bot messages except the control panel."""
+    """Delete ALL bot messages from the DM — full cleanup using conversation history."""
     ack()
     user_id = body["user"]["id"]
+    channel = get_dm_channel(client, user_id)
 
+    # Get bot's own user ID
+    bot_info = client.auth_test()
+    bot_user_id = bot_info["user_id"]
+
+    # Read conversation history and delete all bot messages
+    cursor = None
+    deleted = 0
+    while True:
+        kwargs = {"channel": channel, "limit": 100}
+        if cursor:
+            kwargs["cursor"] = cursor
+
+        result = client.conversations_history(**kwargs)
+
+        for msg in result.get("messages", []):
+            # Only delete messages from the bot, skip the control panel
+            incident = active_incidents.get(user_id)
+            panel_ts = incident["panel"]["ts"] if incident and incident.get("panel") else None
+
+            if msg.get("user") == bot_user_id or msg.get("bot_id"):
+                if panel_ts and msg["ts"] == panel_ts:
+                    continue  # keep the control panel
+                try:
+                    client.chat_delete(channel=channel, ts=msg["ts"])
+                    deleted += 1
+                except Exception:
+                    pass
+
+        # Check for more pages
+        cursor = result.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            break
+
+    # Clear tracked messages
     incident = active_incidents.get(user_id)
-    if not incident:
-        return
+    if incident:
+        incident["sent_messages"] = []
 
-    for msg in incident.get("sent_messages", []):
-        try:
-            client.chat_delete(channel=msg["channel"], ts=msg["ts"])
-        except Exception:
-            pass
-
-    incident["sent_messages"] = []
+    logger.info(f"Chat cleared for user {user_id}: {deleted} messages deleted")
 
 
 # ---------------------------------------------------------------------------
