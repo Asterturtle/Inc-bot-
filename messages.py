@@ -1,9 +1,9 @@
 """
-Slack Block Kit message builders v6.
-- Compact progress bar (variant A) in every message
-- Detailed progress bar (variant B) in /incident-status
-- Color-coded escalation levels
-- Stop, Pause/Resume, Extend buttons
+Slack Block Kit message builders v7.
+- Persistent control panel (updates in place)
+- Compact progress bar in escalation/status messages
+- Detailed progress in /incident-status
+- Color-coded escalation
 """
 
 from escalation import CLIENT_TEMPLATE, INTERNAL_TEMPLATE, ESCALATION_STEPS, STATUS_UPDATE_INTERVAL
@@ -13,45 +13,7 @@ from escalation import CLIENT_TEMPLATE, INTERNAL_TEMPLATE, ESCALATION_STEPS, STA
 # Shared components
 # ---------------------------------------------------------------------------
 
-def _stop_button():
-    return {
-        "type": "button",
-        "text": {"type": "plain_text", "text": "Stop"},
-        "style": "danger",
-        "action_id": "stop_incident",
-        "confirm": {
-            "title": {"type": "plain_text", "text": "Stop incident?"},
-            "text": {"type": "mrkdwn", "text": "This will cancel all timers and end the incident."},
-            "confirm": {"type": "plain_text", "text": "Yes, stop"},
-            "deny": {"type": "plain_text", "text": "Cancel"},
-        },
-    }
-
-
-def _pause_button(is_paused: bool = False):
-    if is_paused:
-        return {
-            "type": "button",
-            "text": {"type": "plain_text", "text": ":arrow_forward: Resume"},
-            "action_id": "resume_incident",
-        }
-    return {
-        "type": "button",
-        "text": {"type": "plain_text", "text": ":double_vertical_bar: Pause"},
-        "action_id": "pause_incident",
-    }
-
-
-def _extend_button():
-    return {
-        "type": "button",
-        "text": {"type": "plain_text", "text": "+5 min"},
-        "action_id": "extend_incident",
-    }
-
-
 def _compact_progress(current_step_index: int) -> str:
-    """Variant A: one-line emoji progress bar."""
     parts = []
     for i, step in enumerate(ESCALATION_STEPS):
         name = step["short"]
@@ -65,7 +27,6 @@ def _compact_progress(current_step_index: int) -> str:
 
 
 def _detailed_progress(current_step_index: int) -> str:
-    """Variant B: multi-line detailed progress for /incident-status."""
     lines = []
     for i, step in enumerate(ESCALATION_STEPS):
         who = step["notify"] or step["optional"] or "—"
@@ -79,9 +40,7 @@ def _detailed_progress(current_step_index: int) -> str:
 
 
 def _next_step_text(current_step_index: int) -> str:
-    """Next escalation + next status update info."""
     current_min = ESCALATION_STEPS[current_step_index]["minutes"]
-
     next_esc = None
     for s in ESCALATION_STEPS:
         if s["minutes"] > current_min:
@@ -102,13 +61,11 @@ def _next_step_text(current_step_index: int) -> str:
 
 
 def _next_status_text(elapsed_minutes: int) -> str:
-    """Next step info for status update messages."""
     next_esc = None
     for s in ESCALATION_STEPS:
         if s["minutes"] > elapsed_minutes:
             next_esc = s
             break
-
     parts = []
     if next_esc:
         mins_until = next_esc["minutes"] - elapsed_minutes
@@ -119,56 +76,92 @@ def _next_status_text(elapsed_minutes: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Control panel (persistent, updates in place)
+# ---------------------------------------------------------------------------
+
+def build_control_panel(elapsed_min: int, current_step: int,
+                        is_paused: bool = False) -> dict:
+    """The single persistent message with status + buttons."""
+
+    if is_paused:
+        status_line = f":double_vertical_bar: *PAUSED* — {elapsed_min} min elapsed"
+    else:
+        status_line = f":red_circle: *ACTIVE* — {elapsed_min} min elapsed"
+
+    progress = _compact_progress(current_step)
+
+    elements = []
+    if is_paused:
+        elements.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": ":arrow_forward: Resume"},
+            "action_id": "resume_incident",
+        })
+    else:
+        elements.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": ":double_vertical_bar: Pause"},
+            "action_id": "pause_incident",
+        })
+
+    elements.append({
+        "type": "button",
+        "text": {"type": "plain_text", "text": ":clock3: +5 min"},
+        "action_id": "extend_incident",
+    })
+    elements.append({
+        "type": "button",
+        "text": {"type": "plain_text", "text": ":bar_chart: Status"},
+        "action_id": "show_status",
+    })
+    elements.append({
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Stop"},
+        "style": "danger",
+        "action_id": "stop_incident",
+        "confirm": {
+            "title": {"type": "plain_text", "text": "Stop incident?"},
+            "text": {"type": "mrkdwn", "text": "This will cancel all timers and end the incident."},
+            "confirm": {"type": "plain_text", "text": "Yes, stop"},
+            "deny": {"type": "plain_text", "text": "Cancel"},
+        },
+    })
+
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": status_line}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": progress}]},
+        {"type": "actions", "elements": elements},
+    ]
+
+    return {"text": f"Incident control — {elapsed_min} min", "blocks": blocks}
+
+
+# ---------------------------------------------------------------------------
 # App Home
 # ---------------------------------------------------------------------------
 
 def build_app_home(has_active_incident: bool = False, duration_minutes: int = 0,
                    is_paused: bool = False, current_step: int = 0) -> list:
     blocks = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": ":rotating_light: GR8Tech Incident Bot"},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "Assists L1 support during Critical incidents with timed escalation reminders and status update templates."},
-        },
+        {"type": "header", "text": {"type": "plain_text", "text": ":rotating_light: GR8Tech Incident Bot"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "Assists L1 support during Critical incidents with timed escalation reminders and status update templates."}},
         {"type": "divider"},
     ]
 
     if has_active_incident:
         status_emoji = ":double_vertical_bar:" if is_paused else ":red_circle:"
         status_text = "PAUSED" if is_paused else "ACTIVE"
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"{status_emoji} *Incident {status_text}* — {duration_minutes} min elapsed"},
-        })
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": _compact_progress(current_step)}],
-        })
-        elements = [_pause_button(is_paused), _extend_button(), _stop_button()]
-        blocks.append({"type": "actions", "elements": elements})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"{status_emoji} *Incident {status_text}* — {duration_minutes} min elapsed"}})
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": _compact_progress(current_step)}]})
     else:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": ":large_green_circle: *No active incident*"},
-        })
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": ":large_green_circle: *No active incident*"}})
         blocks.append({
             "type": "actions",
-            "elements": [{
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Start incident"},
-                "style": "primary",
-                "action_id": "start_incident",
-            }],
+            "elements": [{"type": "button", "text": {"type": "plain_text", "text": "Start incident"}, "style": "primary", "action_id": "start_incident"}],
         })
 
     blocks.append({"type": "divider"})
-    blocks.append({
-        "type": "context",
-        "elements": [{"type": "mrkdwn", "text": "Commands: `/incident-start`  `/incident-stop`  `/incident-status`"}],
-    })
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "Commands: `/incident-start`  `/incident-stop`  `/incident-status`"}]})
     return blocks
 
 
@@ -187,28 +180,21 @@ def build_escalation_message(step: dict, step_index: int) -> dict:
         notify_lines.append(f"_{step['optional']}_")
     notify_text = "\n".join(notify_lines) if notify_lines else "_No mandatory notification at this step_"
 
-    progress = _compact_progress(step_index)
     next_text = _next_step_text(step_index)
 
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": title}},
         {"type": "section", "text": {"type": "mrkdwn", "text": notify_text}},
-        {"type": "context", "elements": [{"type": "mrkdwn", "text": progress}]},
         {"type": "divider"},
         {"type": "context", "elements": [{"type": "mrkdwn", "text": next_text}]},
         {
             "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Done"},
-                    "style": "primary",
-                    "action_id": f"escalation_done_{step_index}",
-                },
-                _pause_button(),
-                _extend_button(),
-                _stop_button(),
-            ],
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Done"},
+                "style": "primary",
+                "action_id": f"escalation_done_{step_index}",
+            }],
         },
     ]
 
@@ -238,16 +224,12 @@ def build_status_update_message(elapsed_minutes: int) -> dict:
         {"type": "context", "elements": [{"type": "mrkdwn", "text": next_text}]},
         {
             "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Done"},
-                    "style": "primary",
-                    "action_id": f"status_done_{elapsed_minutes}",
-                },
-                _pause_button(),
-                _stop_button(),
-            ],
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Done"},
+                "style": "primary",
+                "action_id": f"status_done_{elapsed_minutes}",
+            }],
         },
     ]
 
@@ -255,15 +237,14 @@ def build_status_update_message(elapsed_minutes: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Status command (detailed view)
+# Status view (detailed, for /incident-status and Status button)
 # ---------------------------------------------------------------------------
 
 def build_status_view(elapsed_min: int, current_step: int,
                       escalations_triggered: int, status_updates_sent: int,
                       is_paused: bool = False) -> dict:
     status_emoji = ":double_vertical_bar: PAUSED" if is_paused else ":red_circle: ACTIVE"
-
-    header = f"{status_emoji} — {elapsed_min} min elapsed"
+    header = f"*{status_emoji} — {elapsed_min} min elapsed*"
     progress = _detailed_progress(current_step)
     stats = (
         f"• Escalation steps triggered: {escalations_triggered}\n"
@@ -271,15 +252,11 @@ def build_status_view(elapsed_min: int, current_step: int,
     )
 
     blocks = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{header}*"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": header}},
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text": progress}},
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text": stats}},
-        {
-            "type": "actions",
-            "elements": [_pause_button(is_paused), _extend_button(), _stop_button()],
-        },
     ]
 
     return {"text": f"Incident status — {elapsed_min} min", "blocks": blocks}
@@ -292,9 +269,7 @@ def build_status_view(elapsed_min: int, current_step: int,
 def build_confirmed_message(timestamp: str) -> dict:
     return {
         "text": f"Confirmed at {timestamp}",
-        "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": f":white_check_mark: *Confirmed at {timestamp}*"}},
-        ],
+        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f":white_check_mark: *Confirmed at {timestamp}*"}}],
     }
 
 
@@ -305,35 +280,4 @@ def build_stop_summary(duration_minutes: int, escalations_triggered: int, status
         f"• Escalation steps triggered: {escalations_triggered}\n"
         f"• Status updates sent: {status_updates_sent}"
     )
-    return {
-        "text": "Incident stopped",
-        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}],
-    }
-
-
-def build_paused_message() -> dict:
-    return {
-        "text": "Incident paused",
-        "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": ":double_vertical_bar: *Incident paused.* All timers are on hold. Press *Resume* to continue."}},
-            {"type": "actions", "elements": [_pause_button(is_paused=True), _stop_button()]},
-        ],
-    }
-
-
-def build_resumed_message() -> dict:
-    return {
-        "text": "Incident resumed",
-        "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": ":arrow_forward: *Incident resumed.* Timers are running again."}},
-        ],
-    }
-
-
-def build_extended_message(extra_minutes: int) -> dict:
-    return {
-        "text": f"Extended by {extra_minutes} min",
-        "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": f":clock3: *Next escalation extended by {extra_minutes} minutes.*"}},
-        ],
-    }
+    return {"text": "Incident stopped", "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}]}

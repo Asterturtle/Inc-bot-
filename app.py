@@ -1,8 +1,8 @@
 """
-GR8Tech Incident Bot v6
-- Compact progress bar in messages
-- Detailed progress in /incident-status
-- Color-coded escalation
+GR8Tech Incident Bot v7
+- Persistent control panel (one message, updates in place)
+- Compact progress bar in escalation/status messages
+- Detailed progress in /incident-status & Status button
 - Pause/Resume, Extend +5 min
 - Auto-cleanup on stop
 """
@@ -24,14 +24,12 @@ from escalation import (
 )
 from messages import (
     build_app_home,
+    build_control_panel,
     build_escalation_message,
     build_status_update_message,
     build_status_view,
     build_confirmed_message,
     build_stop_summary,
-    build_paused_message,
-    build_resumed_message,
-    build_extended_message,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -65,7 +63,6 @@ def elapsed_minutes(start_time: datetime) -> int:
 
 
 def get_current_step(incident: dict) -> int:
-    """Determine current escalation step index based on elapsed time."""
     minutes = elapsed_minutes(incident["start_time"])
     current = 0
     for i, step in enumerate(ESCALATION_STEPS):
@@ -89,6 +86,40 @@ def delete_all_messages(client, user_id: str):
             client.chat_delete(channel=msg["channel"], ts=msg["ts"])
         except Exception:
             pass
+    # Also delete control panel
+    panel = incident.get("panel")
+    if panel:
+        try:
+            client.chat_delete(channel=panel["channel"], ts=panel["ts"])
+        except Exception:
+            pass
+
+
+def refresh_panel(client, user_id: str):
+    """Update the control panel message in place."""
+    incident = active_incidents.get(user_id)
+    if not incident or not incident.get("panel"):
+        return
+
+    panel = incident["panel"]
+    minutes = elapsed_minutes(incident["start_time"])
+    current_step = get_current_step(incident)
+
+    msg = build_control_panel(
+        elapsed_min=minutes,
+        current_step=current_step,
+        is_paused=incident.get("paused", False),
+    )
+
+    try:
+        client.chat_update(
+            channel=panel["channel"],
+            ts=panel["ts"],
+            text=msg["text"],
+            blocks=msg["blocks"],
+        )
+    except Exception:
+        pass
 
 
 def update_home(client, user_id: str):
@@ -105,6 +136,27 @@ def update_home(client, user_id: str):
     client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
 
 
+def send_control_panel(client, user_id: str):
+    """Send the initial control panel and store its ts for updates."""
+    incident = active_incidents.get(user_id)
+    if not incident:
+        return
+
+    channel = get_dm_channel(client, user_id)
+    msg = build_control_panel(
+        elapsed_min=0,
+        current_step=0,
+        is_paused=False,
+    )
+
+    result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
+    incident["panel"] = {"channel": channel, "ts": result["ts"]}
+
+
+# ---------------------------------------------------------------------------
+# Core actions
+# ---------------------------------------------------------------------------
+
 def start_incident(client, user_id: str) -> bool:
     if user_id in active_incidents:
         return False
@@ -117,14 +169,20 @@ def start_incident(client, user_id: str) -> bool:
         "status_updates_sent": 0,
         "pending_confirmations": {},
         "sent_messages": [],
+        "panel": None,
         "paused": False,
         "paused_jobs": [],
     }
 
     logger.info(f"Incident started by user {user_id}")
 
+    # Send control panel first
+    send_control_panel(client, user_id)
+
+    # Send T+0 escalation
     send_escalation(client, user_id, step_index=0)
 
+    # Schedule remaining escalation steps
     for i, step in enumerate(ESCALATION_STEPS):
         if i == 0:
             continue
@@ -137,6 +195,7 @@ def start_incident(client, user_id: str) -> bool:
         )
         active_incidents[user_id]["jobs"].append(job_id)
 
+    # Schedule status updates
     job_id = f"{user_id}_status"
     scheduler.add_job(
         send_status_update, "interval",
@@ -146,6 +205,16 @@ def start_incident(client, user_id: str) -> bool:
         id=job_id, replace_existing=True,
     )
     active_incidents[user_id]["jobs"].append(job_id)
+
+    # Schedule panel refresh every minute to keep elapsed time current
+    panel_job = f"{user_id}_panel_refresh"
+    scheduler.add_job(
+        refresh_panel, "interval",
+        minutes=1,
+        args=[client, user_id],
+        id=panel_job, replace_existing=True,
+    )
+    active_incidents[user_id]["jobs"].append(panel_job)
 
     update_home(client, user_id)
     return True
@@ -178,16 +247,17 @@ def stop_incident(client, user_id: str) -> dict | None:
 
 
 def pause_incident(client, user_id: str) -> bool:
-    """Pause all timers. Returns True if paused successfully."""
     incident = active_incidents.get(user_id)
     if not incident or incident.get("paused"):
         return False
 
     paused_info = []
     for job_id in incident["jobs"]:
+        if "panel_refresh" in job_id:
+            continue  # keep panel refresh running
         try:
             job = scheduler.get_job(job_id)
-            if job:
+            if job and job.next_run_time:
                 remaining = (job.next_run_time - datetime.now(timezone.utc)).total_seconds()
                 paused_info.append({"job_id": job_id, "remaining_seconds": max(remaining, 0)})
                 scheduler.pause_job(job_id)
@@ -196,14 +266,12 @@ def pause_incident(client, user_id: str) -> bool:
 
     incident["paused"] = True
     incident["paused_jobs"] = paused_info
-    incident["paused_at"] = datetime.now(timezone.utc)
-
+    refresh_panel(client, user_id)
     update_home(client, user_id)
     return True
 
 
 def resume_incident(client, user_id: str) -> bool:
-    """Resume paused timers. Returns True if resumed successfully."""
     incident = active_incidents.get(user_id)
     if not incident or not incident.get("paused"):
         return False
@@ -221,29 +289,27 @@ def resume_incident(client, user_id: str) -> bool:
 
     incident["paused"] = False
     incident["paused_jobs"] = []
-
+    refresh_panel(client, user_id)
     update_home(client, user_id)
     return True
 
 
 def extend_incident(client, user_id: str, extra_minutes: int = 5) -> bool:
-    """Push all pending escalation jobs by extra_minutes. Returns True if extended."""
     incident = active_incidents.get(user_id)
     if not incident:
         return False
 
     extra = timedelta(minutes=extra_minutes)
-
     for job_id in incident["jobs"]:
-        if "_esc_" in job_id and "repeat" not in job_id:
+        if "_esc_" in job_id and "repeat" not in job_id and "panel" not in job_id:
             try:
                 job = scheduler.get_job(job_id)
                 if job and job.next_run_time:
-                    new_time = job.next_run_time + extra
-                    scheduler.reschedule_job(job_id, trigger="date", run_date=new_time)
+                    scheduler.reschedule_job(job_id, trigger="date", run_date=job.next_run_time + extra)
             except Exception:
                 pass
 
+    refresh_panel(client, user_id)
     return True
 
 
@@ -263,12 +329,12 @@ def send_escalation(client, user_id: str, step_index: int, repeat_count: int = 0
     result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
     track_message(user_id, channel, result["ts"])
 
-    incident.setdefault("pending_confirmations", {})[f"escalation_{step_index}"] = {
-        "channel": channel, "ts": result["ts"], "repeat_count": repeat_count,
-    }
     incident["escalations_triggered"] = max(
         incident.get("escalations_triggered", 0), step_index + 1
     )
+
+    # Refresh panel to show updated step
+    refresh_panel(client, user_id)
 
     if repeat_count < MAX_REPEATS:
         job_id = f"{user_id}_esc_repeat_{step_index}_{repeat_count}"
@@ -293,9 +359,6 @@ def send_status_update(client, user_id: str, repeat_count: int = 0):
     result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
     track_message(user_id, channel, result["ts"])
 
-    incident.setdefault("pending_confirmations", {})[f"status_{minutes}"] = {
-        "channel": channel, "ts": result["ts"], "repeat_count": repeat_count,
-    }
     incident["status_updates_sent"] = incident.get("status_updates_sent", 0) + 1
 
     if repeat_count < MAX_REPEATS:
@@ -329,10 +392,7 @@ def handle_incident_start(ack, command, client):
     channel = get_dm_channel(client, user_id)
 
     if not start_incident(client, user_id):
-        client.chat_postMessage(
-            channel=channel,
-            text=":warning: You already have an active incident. Press *Stop* or use `/incident-stop` first.",
-        )
+        client.chat_postMessage(channel=channel, text=":warning: You already have an active incident. Press *Stop* first.")
 
 
 @app.command("/incident-stop")
@@ -343,7 +403,7 @@ def handle_incident_stop(ack, command, client):
 
     summary_data = stop_incident(client, user_id)
     if not summary_data:
-        client.chat_postMessage(channel=channel, text=":warning: No active incident. Nothing to stop.")
+        client.chat_postMessage(channel=channel, text=":warning: No active incident.")
         return
 
     summary = build_stop_summary(**summary_data)
@@ -361,12 +421,9 @@ def handle_incident_status(ack, command, client):
         client.chat_postMessage(channel=channel, text=":warning: No active incident.")
         return
 
-    minutes = elapsed_minutes(incident["start_time"])
-    current_step = get_current_step(incident)
-
     msg = build_status_view(
-        elapsed_min=minutes,
-        current_step=current_step,
+        elapsed_min=elapsed_minutes(incident["start_time"]),
+        current_step=get_current_step(incident),
         escalations_triggered=incident.get("escalations_triggered", 0),
         status_updates_sent=incident.get("status_updates_sent", 0),
         is_paused=incident.get("paused", False),
@@ -386,10 +443,7 @@ def handle_start_button(ack, body, client):
     channel = get_dm_channel(client, user_id)
 
     if not start_incident(client, user_id):
-        client.chat_postMessage(
-            channel=channel,
-            text=":warning: You already have an active incident. Press *Stop* or use `/incident-stop` first.",
-        )
+        client.chat_postMessage(channel=channel, text=":warning: You already have an active incident. Press *Stop* first.")
 
 
 @app.action(re.compile(r"^(escalation_done_|status_done_)"))
@@ -412,9 +466,9 @@ def handle_done_button(ack, body, client):
                 except Exception:
                     pass
                 jobs_to_remove.append(job_id)
-        for job_id in jobs_to_remove:
-            if job_id in incident["jobs"]:
-                incident["jobs"].remove(job_id)
+        for jid in jobs_to_remove:
+            if jid in incident["jobs"]:
+                incident["jobs"].remove(jid)
 
 
 @app.action("stop_incident")
@@ -425,7 +479,7 @@ def handle_stop_button(ack, body, client):
 
     summary_data = stop_incident(client, user_id)
     if not summary_data:
-        client.chat_postMessage(channel=channel, text=":warning: No active incident. Already stopped.")
+        client.chat_postMessage(channel=channel, text=":warning: No active incident.")
         return
 
     summary = build_stop_summary(**summary_data)
@@ -438,11 +492,7 @@ def handle_pause_button(ack, body, client):
     user_id = body["user"]["id"]
     channel = get_dm_channel(client, user_id)
 
-    if pause_incident(client, user_id):
-        msg = build_paused_message()
-        result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
-        track_message(user_id, channel, result["ts"])
-    else:
+    if not pause_incident(client, user_id):
         client.chat_postMessage(channel=channel, text=":warning: Nothing to pause.")
 
 
@@ -452,11 +502,7 @@ def handle_resume_button(ack, body, client):
     user_id = body["user"]["id"]
     channel = get_dm_channel(client, user_id)
 
-    if resume_incident(client, user_id):
-        msg = build_resumed_message()
-        result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
-        track_message(user_id, channel, result["ts"])
-    else:
+    if not resume_incident(client, user_id):
         client.chat_postMessage(channel=channel, text=":warning: Incident is not paused.")
 
 
@@ -467,11 +513,33 @@ def handle_extend_button(ack, body, client):
     channel = get_dm_channel(client, user_id)
 
     if extend_incident(client, user_id, EXTEND_MINUTES):
-        msg = build_extended_message(EXTEND_MINUTES)
-        result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
+        msg = f":clock3: Next escalation extended by {EXTEND_MINUTES} minutes."
+        result = client.chat_postMessage(channel=channel, text=msg)
         track_message(user_id, channel, result["ts"])
     else:
-        client.chat_postMessage(channel=channel, text=":warning: No active incident to extend.")
+        client.chat_postMessage(channel=channel, text=":warning: No active incident.")
+
+
+@app.action("show_status")
+def handle_status_button(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    channel = get_dm_channel(client, user_id)
+
+    incident = active_incidents.get(user_id)
+    if not incident:
+        client.chat_postMessage(channel=channel, text=":warning: No active incident.")
+        return
+
+    msg = build_status_view(
+        elapsed_min=elapsed_minutes(incident["start_time"]),
+        current_step=get_current_step(incident),
+        escalations_triggered=incident.get("escalations_triggered", 0),
+        status_updates_sent=incident.get("status_updates_sent", 0),
+        is_paused=incident.get("paused", False),
+    )
+    result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
+    track_message(user_id, channel, result["ts"])
 
 
 # ---------------------------------------------------------------------------
@@ -480,5 +548,5 @@ def handle_extend_button(ack, body, client):
 
 if __name__ == "__main__":
     handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
-    logger.info("⚡ Incident Bot v6 is running (Socket Mode)")
+    logger.info("⚡ Incident Bot v7 is running (Socket Mode)")
     handler.start()
