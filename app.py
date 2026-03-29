@@ -1,9 +1,11 @@
 """
-GR8Tech Incident Bot v3
+GR8Tech Incident Bot v5
 - No ticket key needed
 - Everything in DM with bot
 - Stop button in every message
 - App Home with Start button
+- Next step countdown
+- Auto-cleanup: deletes all bot messages on stop, keeps only summary
 """
 
 import os
@@ -57,8 +59,26 @@ def elapsed_minutes(start_time: datetime) -> int:
     return int((datetime.now(timezone.utc) - start_time).total_seconds() / 60)
 
 
+def track_message(user_id: str, channel: str, ts: str):
+    """Track a bot message so we can delete it later."""
+    incident = active_incidents.get(user_id)
+    if incident:
+        incident.setdefault("sent_messages", []).append({"channel": channel, "ts": ts})
+
+
+def delete_all_messages(client, user_id: str):
+    """Delete all tracked bot messages for this incident."""
+    incident = active_incidents.get(user_id)
+    if not incident:
+        return
+    for msg in incident.get("sent_messages", []):
+        try:
+            client.chat_delete(channel=msg["channel"], ts=msg["ts"])
+        except Exception:
+            pass  # message may already be deleted
+
+
 def update_home(client, user_id: str):
-    """Refresh the App Home tab to reflect current state."""
     incident = active_incidents.get(user_id)
     if incident:
         blocks = build_app_home(
@@ -67,15 +87,10 @@ def update_home(client, user_id: str):
         )
     else:
         blocks = build_app_home(has_active_incident=False)
-
-    client.views_publish(
-        user_id=user_id,
-        view={"type": "home", "blocks": blocks},
-    )
+    client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
 
 
 def start_incident(client, user_id: str) -> bool:
-    """Start an incident. Returns True if started, False if already active."""
     if user_id in active_incidents:
         return False
 
@@ -86,14 +101,13 @@ def start_incident(client, user_id: str) -> bool:
         "escalations_triggered": 0,
         "status_updates_sent": 0,
         "pending_confirmations": {},
+        "sent_messages": [],
     }
 
     logger.info(f"Incident started by user {user_id}")
 
-    # Send T+0 immediately
     send_escalation(client, user_id, step_index=0)
 
-    # Schedule remaining escalation steps
     for i, step in enumerate(ESCALATION_STEPS):
         if i == 0:
             continue
@@ -106,7 +120,6 @@ def start_incident(client, user_id: str) -> bool:
         )
         active_incidents[user_id]["jobs"].append(job_id)
 
-    # Schedule recurring status updates
     job_id = f"{user_id}_status"
     scheduler.add_job(
         send_status_update, "interval",
@@ -117,23 +130,25 @@ def start_incident(client, user_id: str) -> bool:
     )
     active_incidents[user_id]["jobs"].append(job_id)
 
-    # Update App Home to show active state
     update_home(client, user_id)
-
     return True
 
 
 def stop_incident(client, user_id: str) -> dict | None:
-    """Stop an active incident. Returns summary data or None."""
     if user_id not in active_incidents:
         return None
     incident = active_incidents[user_id]
     duration = elapsed_minutes(incident["start_time"])
+
     for job_id in incident["jobs"]:
         try:
             scheduler.remove_job(job_id)
         except Exception:
             pass
+
+    # Delete all bot messages from the DM
+    delete_all_messages(client, user_id)
+
     summary_data = {
         "duration_minutes": duration,
         "escalations_triggered": incident.get("escalations_triggered", 0),
@@ -142,9 +157,7 @@ def stop_incident(client, user_id: str) -> dict | None:
     del active_incidents[user_id]
     logger.info(f"Incident stopped by user {user_id} after {duration} min")
 
-    # Update App Home back to idle state
     update_home(client, user_id)
-
     return summary_data
 
 
@@ -162,6 +175,7 @@ def send_escalation(client, user_id: str, step_index: int, repeat_count: int = 0
     msg = build_escalation_message(step, step_index)
 
     result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
+    track_message(user_id, channel, result["ts"])
 
     incident.setdefault("pending_confirmations", {})[f"escalation_{step_index}"] = {
         "channel": channel, "ts": result["ts"], "repeat_count": repeat_count,
@@ -191,6 +205,7 @@ def send_status_update(client, user_id: str, repeat_count: int = 0):
     msg = build_status_update_message(minutes)
 
     result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
+    track_message(user_id, channel, result["ts"])
 
     incident.setdefault("pending_confirmations", {})[f"status_{minutes}"] = {
         "channel": channel, "ts": result["ts"], "repeat_count": repeat_count,
@@ -214,7 +229,6 @@ def send_status_update(client, user_id: str, repeat_count: int = 0):
 
 @app.event("app_home_opened")
 def handle_app_home_opened(client, event):
-    """Show the App Home tab when user opens the bot."""
     user_id = event["user"]
     update_home(client, user_id)
 
@@ -257,7 +271,6 @@ def handle_incident_stop(ack, command, client):
 
 @app.action("start_incident")
 def handle_start_button(ack, body, client):
-    """Handle Start button from App Home."""
     ack()
     user_id = body["user"]["id"]
     channel = get_dm_channel(client, user_id)

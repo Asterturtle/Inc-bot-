@@ -1,10 +1,10 @@
-#  Incident Bot
+# GR8Tech Incident Bot
 
 Slack bot that assists L1 support during Critical incidents with timed escalation reminders and status update templates.
 
 ## What it does
 
-When a support engineer runs `/incident-start`, the bot sends personal DMs on a timer:
+When a support engineer runs `/incident-start PSUPINC-12345`, the bot sends personal DMs on a timer:
 
 **Escalation ladder:**
 - T+0 — Responsible hero
@@ -24,7 +24,7 @@ Each message has a **Done** button. If not pressed within 2 minutes, the reminde
 ### 1. Create Slack App
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch
-2. Name: `Incident Bot`, select your workspace
+2. Name: `GR8 Incident Bot`, select your workspace
 
 ### 2. Configure the app
 
