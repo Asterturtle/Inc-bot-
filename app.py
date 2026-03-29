@@ -452,8 +452,10 @@ def handle_done_button(ack, body, client):
     user_id = body["user"]["id"]
     channel = body["channel"]["id"]
     message_ts = body["message"]["ts"]
+    action = body["actions"][0]
+    description = action.get("value", "")
 
-    confirmed = build_confirmed_message(now_str())
+    confirmed = build_confirmed_message(now_str(), description)
     client.chat_update(channel=channel, ts=message_ts, text=confirmed["text"], blocks=confirmed["blocks"])
 
     incident = active_incidents.get(user_id)

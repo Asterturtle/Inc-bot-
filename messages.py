@@ -246,6 +246,7 @@ def build_escalation_message(step: dict, step_index: int) -> dict:
                 "text": {"type": "plain_text", "text": "Done"},
                 "style": "primary",
                 "action_id": f"escalation_done_{step_index}",
+                "value": f"T+{step['minutes']} — {step['notify'] or step['optional']}",
             }],
         },
     ]
@@ -281,6 +282,7 @@ def build_status_update_message(elapsed_minutes: int) -> dict:
                 "text": {"type": "plain_text", "text": "Done"},
                 "style": "primary",
                 "action_id": f"status_done_{elapsed_minutes}",
+                "value": f"Status update ({elapsed_minutes} min)",
             }],
         },
     ]
@@ -318,10 +320,14 @@ def build_status_view(elapsed_min: int, current_step: int,
 # Utility messages
 # ---------------------------------------------------------------------------
 
-def build_confirmed_message(timestamp: str) -> dict:
+def build_confirmed_message(timestamp: str, description: str = "") -> dict:
+    if description:
+        text = f":white_check_mark: *{description}* — confirmed at {timestamp}"
+    else:
+        text = f":white_check_mark: *Confirmed at {timestamp}*"
     return {
-        "text": f"Confirmed at {timestamp}",
-        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f":white_check_mark: *Confirmed at {timestamp}*"}}],
+        "text": text,
+        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
     }
 
 
