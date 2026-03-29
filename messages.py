@@ -339,3 +339,21 @@ def build_stop_summary(duration_minutes: int, escalations_triggered: int, status
         f"• Status updates sent: {status_updates_sent}"
     )
     return {"text": "Incident stopped", "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}]}
+
+
+def build_welcome_message() -> dict:
+    """Pinned welcome message with Start button in the Messages tab."""
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": ":rotating_light: *GR8Tech Incident Bot*"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "Press the button below to start a Critical incident timer. You'll receive escalation reminders and status update templates right here."}},
+        {
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": ":rotating_light: Start Incident"},
+                "style": "primary",
+                "action_id": "start_incident",
+            }],
+        },
+    ]
+    return {"text": "GR8Tech Incident Bot — Start Incident", "blocks": blocks}

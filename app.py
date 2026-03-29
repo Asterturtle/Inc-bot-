@@ -30,6 +30,7 @@ from messages import (
     build_status_view,
     build_confirmed_message,
     build_stop_summary,
+    build_welcome_message,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -41,6 +42,9 @@ scheduler = BackgroundScheduler()
 scheduler.start()
 
 active_incidents = {}
+
+# Track users who already got the welcome message (so we don't send it twice)
+welcomed_users = set()
 
 EXTEND_MINUTES = 5
 
@@ -373,12 +377,28 @@ def send_status_update(client, user_id: str, repeat_count: int = 0):
 
 
 # ---------------------------------------------------------------------------
-# App Home
+# App Home & Welcome message
 # ---------------------------------------------------------------------------
 
 @app.event("app_home_opened")
 def handle_app_home_opened(client, event):
-    update_home(client, event["user"])
+    user_id = event["user"]
+    tab = event.get("tab", "home")
+
+    if tab == "home":
+        update_home(client, user_id)
+
+    # Send pinned welcome message on first visit to Messages tab
+    if tab == "messages" and user_id not in welcomed_users:
+        welcomed_users.add(user_id)
+        channel = get_dm_channel(client, user_id)
+        msg = build_welcome_message()
+        result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
+        # Pin the welcome message so it stays at the top
+        try:
+            client.pins_add(channel=channel, timestamp=result["ts"])
+        except Exception:
+            pass  # may fail if already pinned or no permission
 
 
 # ---------------------------------------------------------------------------
