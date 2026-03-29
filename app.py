@@ -1,11 +1,10 @@
 """
-GR8Tech Incident Bot v5
-- No ticket key needed
-- Everything in DM with bot
-- Stop button in every message
-- App Home with Start button
-- Next step countdown
-- Auto-cleanup: deletes all bot messages on stop, keeps only summary
+GR8Tech Incident Bot v6
+- Compact progress bar in messages
+- Detailed progress in /incident-status
+- Color-coded escalation
+- Pause/Resume, Extend +5 min
+- Auto-cleanup on stop
 """
 
 import os
@@ -27,8 +26,12 @@ from messages import (
     build_app_home,
     build_escalation_message,
     build_status_update_message,
+    build_status_view,
     build_confirmed_message,
     build_stop_summary,
+    build_paused_message,
+    build_resumed_message,
+    build_extended_message,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -40,6 +43,8 @@ scheduler = BackgroundScheduler()
 scheduler.start()
 
 active_incidents = {}
+
+EXTEND_MINUTES = 5
 
 
 # ---------------------------------------------------------------------------
@@ -59,15 +64,23 @@ def elapsed_minutes(start_time: datetime) -> int:
     return int((datetime.now(timezone.utc) - start_time).total_seconds() / 60)
 
 
+def get_current_step(incident: dict) -> int:
+    """Determine current escalation step index based on elapsed time."""
+    minutes = elapsed_minutes(incident["start_time"])
+    current = 0
+    for i, step in enumerate(ESCALATION_STEPS):
+        if minutes >= step["minutes"]:
+            current = i
+    return current
+
+
 def track_message(user_id: str, channel: str, ts: str):
-    """Track a bot message so we can delete it later."""
     incident = active_incidents.get(user_id)
     if incident:
         incident.setdefault("sent_messages", []).append({"channel": channel, "ts": ts})
 
 
 def delete_all_messages(client, user_id: str):
-    """Delete all tracked bot messages for this incident."""
     incident = active_incidents.get(user_id)
     if not incident:
         return
@@ -75,7 +88,7 @@ def delete_all_messages(client, user_id: str):
         try:
             client.chat_delete(channel=msg["channel"], ts=msg["ts"])
         except Exception:
-            pass  # message may already be deleted
+            pass
 
 
 def update_home(client, user_id: str):
@@ -84,6 +97,8 @@ def update_home(client, user_id: str):
         blocks = build_app_home(
             has_active_incident=True,
             duration_minutes=elapsed_minutes(incident["start_time"]),
+            is_paused=incident.get("paused", False),
+            current_step=get_current_step(incident),
         )
     else:
         blocks = build_app_home(has_active_incident=False)
@@ -102,6 +117,8 @@ def start_incident(client, user_id: str) -> bool:
         "status_updates_sent": 0,
         "pending_confirmations": {},
         "sent_messages": [],
+        "paused": False,
+        "paused_jobs": [],
     }
 
     logger.info(f"Incident started by user {user_id}")
@@ -146,7 +163,6 @@ def stop_incident(client, user_id: str) -> dict | None:
         except Exception:
             pass
 
-    # Delete all bot messages from the DM
     delete_all_messages(client, user_id)
 
     summary_data = {
@@ -161,13 +177,83 @@ def stop_incident(client, user_id: str) -> dict | None:
     return summary_data
 
 
+def pause_incident(client, user_id: str) -> bool:
+    """Pause all timers. Returns True if paused successfully."""
+    incident = active_incidents.get(user_id)
+    if not incident or incident.get("paused"):
+        return False
+
+    paused_info = []
+    for job_id in incident["jobs"]:
+        try:
+            job = scheduler.get_job(job_id)
+            if job:
+                remaining = (job.next_run_time - datetime.now(timezone.utc)).total_seconds()
+                paused_info.append({"job_id": job_id, "remaining_seconds": max(remaining, 0)})
+                scheduler.pause_job(job_id)
+        except Exception:
+            pass
+
+    incident["paused"] = True
+    incident["paused_jobs"] = paused_info
+    incident["paused_at"] = datetime.now(timezone.utc)
+
+    update_home(client, user_id)
+    return True
+
+
+def resume_incident(client, user_id: str) -> bool:
+    """Resume paused timers. Returns True if resumed successfully."""
+    incident = active_incidents.get(user_id)
+    if not incident or not incident.get("paused"):
+        return False
+
+    now = datetime.now(timezone.utc)
+    for info in incident.get("paused_jobs", []):
+        try:
+            job = scheduler.get_job(info["job_id"])
+            if job:
+                new_run_time = now + timedelta(seconds=info["remaining_seconds"])
+                scheduler.reschedule_job(info["job_id"], trigger="date", run_date=new_run_time)
+                scheduler.resume_job(info["job_id"])
+        except Exception:
+            pass
+
+    incident["paused"] = False
+    incident["paused_jobs"] = []
+
+    update_home(client, user_id)
+    return True
+
+
+def extend_incident(client, user_id: str, extra_minutes: int = 5) -> bool:
+    """Push all pending escalation jobs by extra_minutes. Returns True if extended."""
+    incident = active_incidents.get(user_id)
+    if not incident:
+        return False
+
+    extra = timedelta(minutes=extra_minutes)
+
+    for job_id in incident["jobs"]:
+        if "_esc_" in job_id and "repeat" not in job_id:
+            try:
+                job = scheduler.get_job(job_id)
+                if job and job.next_run_time:
+                    new_time = job.next_run_time + extra
+                    scheduler.reschedule_job(job_id, trigger="date", run_date=new_time)
+            except Exception:
+                pass
+
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Scheduled jobs
 # ---------------------------------------------------------------------------
 
 def send_escalation(client, user_id: str, step_index: int, repeat_count: int = 0):
     incident = active_incidents.get(user_id)
-    if not incident:
+    if not incident or incident.get("paused"):
         return
 
     step = ESCALATION_STEPS[step_index]
@@ -197,7 +283,7 @@ def send_escalation(client, user_id: str, step_index: int, repeat_count: int = 0
 
 def send_status_update(client, user_id: str, repeat_count: int = 0):
     incident = active_incidents.get(user_id)
-    if not incident:
+    if not incident or incident.get("paused"):
         return
 
     minutes = elapsed_minutes(incident["start_time"])
@@ -229,8 +315,7 @@ def send_status_update(client, user_id: str, repeat_count: int = 0):
 
 @app.event("app_home_opened")
 def handle_app_home_opened(client, event):
-    user_id = event["user"]
-    update_home(client, user_id)
+    update_home(client, event["user"])
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +348,31 @@ def handle_incident_stop(ack, command, client):
 
     summary = build_stop_summary(**summary_data)
     client.chat_postMessage(channel=channel, text=summary["text"], blocks=summary["blocks"])
+
+
+@app.command("/incident-status")
+def handle_incident_status(ack, command, client):
+    ack()
+    user_id = command["user_id"]
+    channel = get_dm_channel(client, user_id)
+
+    incident = active_incidents.get(user_id)
+    if not incident:
+        client.chat_postMessage(channel=channel, text=":warning: No active incident.")
+        return
+
+    minutes = elapsed_minutes(incident["start_time"])
+    current_step = get_current_step(incident)
+
+    msg = build_status_view(
+        elapsed_min=minutes,
+        current_step=current_step,
+        escalations_triggered=incident.get("escalations_triggered", 0),
+        status_updates_sent=incident.get("status_updates_sent", 0),
+        is_paused=incident.get("paused", False),
+    )
+    result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
+    track_message(user_id, channel, result["ts"])
 
 
 # ---------------------------------------------------------------------------
@@ -322,11 +432,53 @@ def handle_stop_button(ack, body, client):
     client.chat_postMessage(channel=channel, text=summary["text"], blocks=summary["blocks"])
 
 
+@app.action("pause_incident")
+def handle_pause_button(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    channel = get_dm_channel(client, user_id)
+
+    if pause_incident(client, user_id):
+        msg = build_paused_message()
+        result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
+        track_message(user_id, channel, result["ts"])
+    else:
+        client.chat_postMessage(channel=channel, text=":warning: Nothing to pause.")
+
+
+@app.action("resume_incident")
+def handle_resume_button(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    channel = get_dm_channel(client, user_id)
+
+    if resume_incident(client, user_id):
+        msg = build_resumed_message()
+        result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
+        track_message(user_id, channel, result["ts"])
+    else:
+        client.chat_postMessage(channel=channel, text=":warning: Incident is not paused.")
+
+
+@app.action("extend_incident")
+def handle_extend_button(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    channel = get_dm_channel(client, user_id)
+
+    if extend_incident(client, user_id, EXTEND_MINUTES):
+        msg = build_extended_message(EXTEND_MINUTES)
+        result = client.chat_postMessage(channel=channel, text=msg["text"], blocks=msg["blocks"])
+        track_message(user_id, channel, result["ts"])
+    else:
+        client.chat_postMessage(channel=channel, text=":warning: No active incident to extend.")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
-    logger.info("⚡ Incident Bot is running (Socket Mode)")
+    logger.info("⚡ Incident Bot v6 is running (Socket Mode)")
     handler.start()
