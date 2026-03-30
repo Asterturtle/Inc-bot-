@@ -528,7 +528,9 @@ def handle_extend_button(ack, body, client):
 
 @app.action("skip_to_next")
 def handle_skip_button(ack, body, client):
-    """Skip to next step — fires next escalation or status update immediately."""
+    """Skip to next step — alternates between escalation and status update.
+    Sequence: esc0 → status → esc1 → status → esc2 → status → ... → esc4 → status → status...
+    """
     ack()
     user_id = body["user"]["id"]
     channel = get_dm_channel(client, user_id)
@@ -538,23 +540,40 @@ def handle_skip_button(ack, body, client):
         client.chat_postMessage(channel=channel, text=":warning: No active incident.")
         return
 
-    current_step = get_current_step(incident)
-    next_step = current_step + 1
+    # Track demo state: which escalation step we're on and whether next is status
+    demo_step = incident.get("demo_step", 0)
+    demo_next_is_status = incident.get("demo_next_is_status", True)
 
-    # Determine what to fire next: escalation or status update
-    if next_step < len(ESCALATION_STEPS):
-        # Cancel the scheduled job for this step (so it doesn't fire twice)
-        job_id = f"{user_id}_esc_{next_step}"
-        try:
-            scheduler.remove_job(job_id)
-        except Exception:
-            pass
-
-        # Fire escalation immediately
-        send_escalation(client, user_id, step_index=next_step)
-    else:
-        # All escalations done — fire a status update instead
+    if demo_next_is_status:
+        # Send status update
+        demo_minutes = ESCALATION_STEPS[demo_step]["minutes"] + STATUS_UPDATE_INTERVAL
         send_status_update(client, user_id)
+        incident["demo_next_is_status"] = False
+    else:
+        # Move to next escalation step
+        demo_step += 1
+        if demo_step < len(ESCALATION_STEPS):
+            # Cancel the scheduled job so it doesn't fire twice
+            job_id = f"{user_id}_esc_{demo_step}"
+            try:
+                scheduler.remove_job(job_id)
+            except Exception:
+                pass
+
+            # Update the start_time to simulate being at this step
+            incident["start_time"] = datetime.now(timezone.utc) - timedelta(
+                minutes=ESCALATION_STEPS[demo_step]["minutes"]
+            )
+            incident["demo_step"] = demo_step
+
+            send_escalation(client, user_id, step_index=demo_step)
+            incident["demo_next_is_status"] = True
+        else:
+            # All escalations done, just send status updates
+            send_status_update(client, user_id)
+
+    # Refresh panel to show updated progress
+    refresh_panel(client, user_id)
 
 
 @app.action("show_status")
