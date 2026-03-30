@@ -526,6 +526,37 @@ def handle_extend_button(ack, body, client):
         client.chat_postMessage(channel=channel, text=":warning: No active incident.")
 
 
+@app.action("skip_to_next")
+def handle_skip_button(ack, body, client):
+    """Skip to next step — fires next escalation or status update immediately."""
+    ack()
+    user_id = body["user"]["id"]
+    channel = get_dm_channel(client, user_id)
+
+    incident = active_incidents.get(user_id)
+    if not incident:
+        client.chat_postMessage(channel=channel, text=":warning: No active incident.")
+        return
+
+    current_step = get_current_step(incident)
+    next_step = current_step + 1
+
+    # Determine what to fire next: escalation or status update
+    if next_step < len(ESCALATION_STEPS):
+        # Cancel the scheduled job for this step (so it doesn't fire twice)
+        job_id = f"{user_id}_esc_{next_step}"
+        try:
+            scheduler.remove_job(job_id)
+        except Exception:
+            pass
+
+        # Fire escalation immediately
+        send_escalation(client, user_id, step_index=next_step)
+    else:
+        # All escalations done — fire a status update instead
+        send_status_update(client, user_id)
+
+
 @app.action("show_status")
 def handle_status_button(ack, body, client):
     ack()

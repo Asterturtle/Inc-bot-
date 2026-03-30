@@ -106,6 +106,11 @@ def build_control_panel(elapsed_min: int, current_step: int,
 
     elements.append({
         "type": "button",
+        "text": {"type": "plain_text", "text": ":fast_forward: Skip"},
+        "action_id": "skip_to_next",
+    })
+    elements.append({
+        "type": "button",
         "text": {"type": "plain_text", "text": ":clock3: +5 min"},
         "action_id": "extend_incident",
     })
